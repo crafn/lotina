@@ -60,10 +60,16 @@ const int index_shift[9] = {
 	1 + DOMAIN_WIDTH, -1 + DOMAIN_WIDTH, -1 - DOMAIN_WIDTH, 1 - DOMAIN_WIDTH
 };
 
-const int mirrored_dir_index[9] = {
+const int point_mirrored_dir_index[9] = {
 	0,
 	3, 4, 1, 2,
 	7, 8, 5, 6
+};
+
+const int side_mirrored_dir_index[9] = {
+	0,
+	3, 4, 1, 2,
+	8, 7, 6, 5
 };
 
 char is_domain_edge(int x, int y)
@@ -77,37 +83,46 @@ int main(void)
 	float f_tmp[DOMAIN_SIZE][9] = {{0}};
 	float rho[DOMAIN_SIZE] = {0};
 	float psi[DOMAIN_SIZE] = {0}; /* Cohesion */
+	float psi2[DOMAIN_SIZE] = {0};
 	struct Ltn_V2f u[DOMAIN_SIZE] = {{0, 0}};
 	char boundary[DOMAIN_SIZE] = {0};
 	int i, k, x, y;
-	const float c = 1.0f;
-	const float tau = 0.7f;
+	int step = 0;
+	const float c = 1.01f;
+	const float tau = 0.6f;
 	const float dx = 1.0f;
-	const float rho_0 = 1.0f;
+	char * map = NULL;
+
+	{ /* Load map (leaks) */
+		long length;
+		FILE * f = fopen("map", "rb");
+		assert(f && "Where's map?");
+		fseek(f, 0, SEEK_END);
+		length = ftell(f);
+		assert(length == (DOMAIN_WIDTH + 1)*DOMAIN_HEIGHT);
+		fseek(f, 0, SEEK_SET);
+		map = malloc(length);
+		fread(map, 1, length, f);
+		fclose(f);
+	}
+
+	system("clear");
+
 
 	/* Initial conditions */
 	for (y = 0; y < DOMAIN_HEIGHT; ++y) {
 		for (x = 0; x < DOMAIN_WIDTH; ++x) {
-			if (	x > 70 && x + 1 < DOMAIN_WIDTH &&
-					y > 2 && y < 10 && y + 1 < DOMAIN_HEIGHT) {
+			char ch = map[x + (DOMAIN_WIDTH + 1)*y];
+
+			if (ch == 'w')
 				for (k = 0; k < 9; ++k)
-					f[F_IX(x,y)][k] = w[k]*50;
-			}
+					f[F_IX(x,y)][k] =  w[k]*10;
+			else if (ch == '#')
+				boundary[F_IX(x,y)] = 1;
 
 			if (is_domain_edge(x, y))
 				boundary[F_IX(x,y)] = 1;
 
-			if (x == 15 && y < 40)
-				boundary[F_IX(x,y)] = 1;
-
-			if (y == 40 && x >= 15 && x < 40)
-				boundary[F_IX(x,y)] = 1;
-
-			if (x == 70  && y > 25)
-				boundary[F_IX(x,y)] = 1;
-
-			if (y == 20 && x > 25)
-				boundary[F_IX(x,y)] = 1;
 		}
 	}
 
@@ -116,6 +131,8 @@ int main(void)
 
 		/* Update some fields */
 		float total_mass = 0.0;
+		float max_u = 0.0;
+		float max_rho = 0.0;
 		for (i = 0; i < DOMAIN_SIZE; ++i) {
 			rho[i] = 0.0;
 			for (k = 0; k < 9; ++k)
@@ -124,14 +141,22 @@ int main(void)
 
 			u[i].x = u[i].y = 0.0;
 			for (k = 0; k < 9; ++k) {
-				u[i].x += c*v_e[k].x*f[i][k];
-				u[i].y += c*v_e[k].y*f[i][k];
+				u[i].x += v_e[k].x*f[i][k];
+				u[i].y += v_e[k].y*f[i][k];
 			}
-			u[i].x /= (rho[i] + 0.0001);
-			u[i].y /= (rho[i] + 0.0001);
+			u[i].x /= (rho[i] + 0.00001);
+			u[i].y /= (rho[i] + 0.00001);
+
+			if (ltn_dot_v2f(u[i], u[i]) > max_u*max_u)
+				max_u = sqrt(ltn_dot_v2f(u[i], u[i]));
+
+			if (rho[i] > max_rho)
+				max_rho = rho[i];
 
 			/* Multiplier determines cohesion strength */
-			psi[i] = 5.0*exp(-rho_0/rho[i]);
+			psi[i] = 3.5*exp(-0.7/rho[i]);
+
+			psi2[i] = rho[i]*0.0;
 		}
 
 		/* Collision step */
@@ -141,10 +166,11 @@ int main(void)
 				int i = F_IX(x,y);
 				struct Ltn_V2f force = {0, 0};
 				struct Ltn_V2f u_xy = u[i];
+				float total_feq = 0.0;
 
 				{ /* Gravity */
 					const struct Ltn_V2f g = {
-						0.0, 0.05
+						0.0, 0.1
 					};
 					float m = dx*dx*rho[i];
 					force.x += g.x*m;
@@ -155,12 +181,15 @@ int main(void)
 					for (k = 1; k < 9; ++k) {
 						force.x += psi[i]*w[k]*psi[i + index_shift[k]]*v_e[k].x;
 						force.y += psi[i]*w[k]*psi[i + index_shift[k]]*v_e[k].y;
+
+						force.x += w[k]*(psi2[i] - psi2[i + index_shift[k]])*v_e[k].x;
+						force.y += w[k]*(psi2[i] - psi2[i + index_shift[k]])*v_e[k].y;
 					}
 				}
 
-				{ /* Apply external forces */
-					u_xy.x += tau*force.x/rho[i];
-					u_xy.y += tau*force.y/rho[i];
+				if (1){ /* Apply external forces */
+					u_xy.x += tau*force.x/(rho[i] + 0.000001);
+					u_xy.y += tau*force.y/(rho[i] + 0.000001);
 				}
 
 				for (k = 0; k < 9; ++k) {
@@ -168,15 +197,18 @@ int main(void)
 					float f_eq;
 
 					{ /* BGK */
-						float s_k = w[k]*(	3.0f*ltn_dot_v2f(v_e[k], u_xy)/c +
-											9.0f/2*ltn_dot_v2f(v_e[k], u_xy)*ltn_dot_v2f(v_e[k], u_xy)/(c*c) +
-											-3.0f/2*ltn_dot_v2f(u_xy, u_xy)/(c*c));
-						f_eq = rho[i]*(w[k] + s_k);
+						/* This produces negative values sometimes. Maybe too large velocities. */
+						float a1, a2, a3;
+						a1 = 3.0f*ltn_dot_v2f(v_e[k], u_xy)/c;
+						a2 = 9.0f/2*ltn_dot_v2f(v_e[k], u_xy)*ltn_dot_v2f(v_e[k], u_xy)/(c*c);
+						a3 = -3.0f/2*ltn_dot_v2f(u_xy, u_xy)/(c*c);
+						f_eq = rho[i]*w[k]*(1 + a1 + a2 + a3);
+						total_feq += f_eq;
 					}
 
 					{
-						float new_f_k = f_k - (f_k - f_eq)/tau;
-						f_tmp[i][k] = LTN_GREATEST(new_f_k, 0.0);
+						float new_f_k = LTN_GREATEST(f_k - (f_k - f_eq)/tau, 0);
+						f_tmp[i][k] = new_f_k;
 						new_rho += f_tmp[i][k];
 					}
 				}
@@ -200,6 +232,7 @@ int main(void)
 		for (y = 1; y < DOMAIN_HEIGHT - 1; ++y) {
 			for (x = 1; x < DOMAIN_WIDTH - 1; ++x) {
 				int i = F_IX(x,y);
+				/* Shouldn't be necessary */
 				for (k = 0; k < 9; ++k)
 					f[i][k] = 0.0f;
 
@@ -214,7 +247,8 @@ int main(void)
 					if (boundary[from_i] == 0) /* Free flow */
 						f[i][k] = f_tmp[from_i][k];
 					else { /* Mirror flow from boundary */
-						f[i][k] = f_tmp[i][mirrored_dir_index[k]];
+						/* @todo Damping? */
+						f[i][k] = f_tmp[i][side_mirrored_dir_index[k]];
 					}
 #else
 					f[i][k] = f_tmp[from_i][k];
@@ -230,42 +264,45 @@ int main(void)
 			mass_check_2 += rho*dx*dx;
 		}
 
-		clear_screen();
+		if ((step++) % 3 == 0) {
+			/* Draw domain */
+			clear_screen();
+			for (y = 0; y < DOMAIN_HEIGHT; ++y) {
+				for (x = 0; x < DOMAIN_WIDTH; ++x) {
+					float rho_xy = rho[F_IX(x,y)];
 
-		/* Draw domain */
-		for (y = 0; y < DOMAIN_HEIGHT; ++y) {
-			for (x = 0; x < DOMAIN_WIDTH; ++x) {
-				float rho_xy = rho[F_IX(x,y)];
+					if (boundary[F_IX(x,y)] == 1)
+						draw_char(x, y, '[');
 
-				if (boundary[F_IX(x,y)] == 1)
-					draw_char(x, y, '#');
+					if (rho_xy > 0.001) {
+						char ch;
+						if (rho_xy < 0.3)
+							ch = ' ';
+						else if (rho_xy < 0.6)
+							ch = '~';
+						else if (rho_xy < 10.0)
+							ch = '*';
+						else
+							ch = '#';
 
-				if (rho_xy > 0.001) {
-					char ch;
-					if (rho_xy < 0.3)
-						ch = '.';
-					else if (rho_xy < 0.6)
-						ch = '~';
-					else
-						ch = '*';
-
-					if (ch == '*')
-					draw_char(x, y, ch);
+						draw_char(x, y, ch);
+					}
 				}
 			}
-		}
+			blit_screen();
 
-		blit_screen();
-		printf("Fluid mass: %f\n", total_mass);
-		printf("dif: %f\n", mass_check - total_mass);
-		printf("dif2: %f\n", mass_check_2 - mass_check);
-
-#if defined(LINUX)
-		usleep(1000000/60);
+			printf("Fluid mass: %f\n", total_mass);
+			printf("dif: %f\n", mass_check - total_mass);
+			printf("dif2: %f\n", mass_check_2 - mass_check);
+			printf("max rho: %f\n", max_rho);
+			printf("max u: %f\n", max_u);
+#if 1
+			usleep(1000000/60);
 #else
-		if (getchar() == 'q')
-			break;
+			if (getchar() == 'q')
+				break;
 #endif
+		}
 	}
 	return 0;
 }
