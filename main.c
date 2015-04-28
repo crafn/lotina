@@ -66,6 +66,7 @@ const int point_mirrored_dir_index[9] = {
 	7, 8, 5, 6
 };
 
+/* Prefers vertical mirroring */
 const int side_mirrored_dir_index[9] = {
 	0,
 	3, 4, 1, 2,
@@ -89,7 +90,7 @@ int main(void)
 	int i, k, x, y;
 	int step = 0;
 	const float c = 1.01f;
-	const float tau = 0.6f;
+	const float tau = 0.9f;
 	const float dx = 1.0f;
 	char * map = NULL;
 
@@ -116,8 +117,8 @@ int main(void)
 
 			if (ch == 'w')
 				for (k = 0; k < 9; ++k)
-					f[F_IX(x,y)][k] =  w[k]*10;
-			else if (ch == '#')
+					f[F_IX(x,y)][k] =  w[k]*20;
+			else if (ch == '[')
 				boundary[F_IX(x,y)] = 1;
 
 			if (is_domain_edge(x, y))
@@ -154,7 +155,7 @@ int main(void)
 				max_rho = rho[i];
 
 			/* Multiplier determines cohesion strength */
-			psi[i] = 3.5*exp(-0.7/rho[i]);
+			psi[i] = 2.5*exp(-0.7/rho[i]);
 
 			psi2[i] = rho[i]*0.0;
 		}
@@ -229,30 +230,37 @@ int main(void)
 		}
 
 		/* Streaming step */
+		for (i = 0; i < DOMAIN_SIZE; ++i)
+			for (k = 0; k < 9; ++k)
+				f[i][k] = 0; /* This shouldn't be necessary, but otherwise mass grows o_O */
 		for (y = 1; y < DOMAIN_HEIGHT - 1; ++y) {
 			for (x = 1; x < DOMAIN_WIDTH - 1; ++x) {
 				int i = F_IX(x,y);
-				/* Shouldn't be necessary */
-				for (k = 0; k < 9; ++k)
-					f[i][k] = 0.0f;
+				for (k = 0; k < 9; ++k) {
+					int to_i = i + index_shift[k];
+					f[to_i][k] = f_tmp[i][k];
+					f_tmp[i][k] = 0.0; /* Shouldn't be necessary */
+				}
+			}
+		}
+
+		/* Mirror from boundaries */
+		for (y = 0; y < DOMAIN_HEIGHT; ++y) {
+			for (x = 0; x < DOMAIN_WIDTH; ++x) {
+				int i = F_IX(x,y);
+
+				if (boundary[i] == 0)
+					continue;
 
 				for (k = 0; k < 9; ++k) {
-					int from_i = i - index_shift[k];
-#if 1
-					if (boundary[i]) {
-						f[i][k] = 0.0f;
-						continue;
-					}
+					int from_i;
+					if (f[i][k] == 0.0f)
+						continue; /* This is scary, as it protects from out-of-bounds access */
 
-					if (boundary[from_i] == 0) /* Free flow */
-						f[i][k] = f_tmp[from_i][k];
-					else { /* Mirror flow from boundary */
-						/* @todo Damping? */
-						f[i][k] = f_tmp[i][side_mirrored_dir_index[k]];
-					}
-#else
-					f[i][k] = f_tmp[from_i][k];
-#endif
+					from_i = i - index_shift[k];
+					assert(boundary[from_i] == 0);
+					f[from_i][side_mirrored_dir_index[k]] += f[i][k];
+					f[i][k] = 0.0f;
 				}
 			}
 		}
@@ -264,7 +272,7 @@ int main(void)
 			mass_check_2 += rho*dx*dx;
 		}
 
-		if ((step++) % 3 == 0) {
+		if ((step++) % 2 == 0) {
 			/* Draw domain */
 			clear_screen();
 			for (y = 0; y < DOMAIN_HEIGHT; ++y) {
@@ -277,7 +285,7 @@ int main(void)
 					if (rho_xy > 0.001) {
 						char ch;
 						if (rho_xy < 0.3)
-							ch = ' ';
+							ch = '.';
 						else if (rho_xy < 0.6)
 							ch = '~';
 						else if (rho_xy < 10.0)
