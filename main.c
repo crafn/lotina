@@ -1,6 +1,7 @@
 #include "lotina.h"
 
 #include <assert.h>
+#include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
 
@@ -65,18 +66,24 @@ const int mirrored_dir_index[9] = {
 	7, 8, 5, 6
 };
 
+char is_domain_edge(int x, int y)
+{
+	return x == 0 || y == 0 || x + 1 == DOMAIN_WIDTH || y + 1 == DOMAIN_HEIGHT;
+}
+
 int main(void)
 {
 	float f[DOMAIN_SIZE][9] = {{0}};
 	float f_tmp[DOMAIN_SIZE][9] = {{0}};
 	float rho[DOMAIN_SIZE] = {0};
+	float psi[DOMAIN_SIZE] = {0}; /* Cohesion */
 	struct Ltn_V2f u[DOMAIN_SIZE] = {{0, 0}};
 	char boundary[DOMAIN_SIZE] = {0};
 	int i, k, x, y;
 	const float c = 1.0f;
-	const float tau = 2.5f;
+	const float tau = 0.7f;
 	const float dx = 1.0f;
-	float rho_0 = 1.0f;
+	const float rho_0 = 1.0f;
 
 	/* Initial conditions */
 	for (y = 0; y < DOMAIN_HEIGHT; ++y) {
@@ -84,13 +91,16 @@ int main(void)
 			if (	x > 70 && x + 1 < DOMAIN_WIDTH &&
 					y > 2 && y < 10 && y + 1 < DOMAIN_HEIGHT) {
 				for (k = 0; k < 9; ++k)
-					f[F_IX(x,y)][k] = w[k]*1.0;
+					f[F_IX(x,y)][k] = w[k]*50;
 			}
 
-			if (x == 0 || y == 0 || x + 1 == DOMAIN_WIDTH || y + 1 == DOMAIN_HEIGHT)
+			if (is_domain_edge(x, y))
 				boundary[F_IX(x,y)] = 1;
 
-			if (x == 15 && y > 10)
+			if (x == 15 && y < 40)
+				boundary[F_IX(x,y)] = 1;
+
+			if (y == 40 && x >= 15 && x < 40)
 				boundary[F_IX(x,y)] = 1;
 
 			if (x == 70  && y > 25)
@@ -104,7 +114,7 @@ int main(void)
 	while (1) {
 		float mass_check = 0.0f, mass_check_2 = 0.0f;
 
-		/* Update density and velocity fields */
+		/* Update some fields */
 		float total_mass = 0.0;
 		for (i = 0; i < DOMAIN_SIZE; ++i) {
 			rho[i] = 0.0;
@@ -119,6 +129,9 @@ int main(void)
 			}
 			u[i].x /= (rho[i] + 0.0001);
 			u[i].y /= (rho[i] + 0.0001);
+
+			/* Multiplier determines cohesion strength */
+			psi[i] = 5.0*exp(-rho_0/rho[i]);
 		}
 
 		/* Collision step */
@@ -126,41 +139,53 @@ int main(void)
 			for (x = 0; x < DOMAIN_WIDTH; ++x) {
 				float new_rho = 0.0f;
 				int i = F_IX(x,y);
+				struct Ltn_V2f force = {0, 0};
+				struct Ltn_V2f u_xy = u[i];
+
+				{ /* Gravity */
+					const struct Ltn_V2f g = {
+						0.0, 0.05
+					};
+					float m = dx*dx*rho[i];
+					force.x += g.x*m;
+					force.y += g.y*m;
+				}
+
+				if (!is_domain_edge(x,y)) { /* Cohesion */
+					for (k = 1; k < 9; ++k) {
+						force.x += psi[i]*w[k]*psi[i + index_shift[k]]*v_e[k].x;
+						force.y += psi[i]*w[k]*psi[i + index_shift[k]]*v_e[k].y;
+					}
+				}
+
+				{ /* Apply external forces */
+					u_xy.x += tau*force.x/rho[i];
+					u_xy.y += tau*force.y/rho[i];
+				}
+
 				for (k = 0; k < 9; ++k) {
-					struct Ltn_V2f u_xy = u[i];
 					float f_k = f[i][k];
-					float f_eq, f_force;
+					float f_eq;
+
 					{ /* BGK */
 						float s_k = w[k]*(	3.0f*ltn_dot_v2f(v_e[k], u_xy)/c +
 											9.0f/2*ltn_dot_v2f(v_e[k], u_xy)*ltn_dot_v2f(v_e[k], u_xy)/(c*c) +
 											-3.0f/2*ltn_dot_v2f(u_xy, u_xy)/(c*c));
-						f_eq = rho[i]*w[k] + rho_0*s_k;
-					}
-
-					{ /* Apply external forces */
-						const struct Ltn_V2f g = {
-							0.0, 1
-						};
-						float m = rho[i]*dx*dx;
-						struct Ltn_V2f f;
-						f.x = g.x*m;
-						f.y = g.y*m;
-
-						/* @todo */
-						f_force = w[k]*ltn_dot_v2f(v_e[k], f);
-						f_force = 0.0;
+						f_eq = rho[i]*(w[k] + s_k);
 					}
 
 					{
-						float new_f_k = f_k - (f_k - f_eq)/tau + f_force;
+						float new_f_k = f_k - (f_k - f_eq)/tau;
 						f_tmp[i][k] = LTN_GREATEST(new_f_k, 0.0);
 						new_rho += f_tmp[i][k];
 					}
 				}
 
+#if 1
 				/* HACK -- preserve mass */
 				for (k = 0; k < 9; ++k)
 					f_tmp[i][k] *= (rho[i] + 0.0000001)/(new_rho + 0.00000001);
+#endif
 			}
 		}
 
@@ -215,7 +240,7 @@ int main(void)
 				if (boundary[F_IX(x,y)] == 1)
 					draw_char(x, y, '#');
 
-				if (rho_xy > 0.01) {
+				if (rho_xy > 0.001) {
 					char ch;
 					if (rho_xy < 0.3)
 						ch = '.';
@@ -224,6 +249,7 @@ int main(void)
 					else
 						ch = '*';
 
+					if (ch == '*')
 					draw_char(x, y, ch);
 				}
 			}
